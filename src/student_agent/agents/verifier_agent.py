@@ -156,6 +156,8 @@ class VerifierAgent:
         # Consistency: Confidence calibration
         if len(data_conflicts) > 0 and output["assessment"]["confidence"] > 0.80:
             output["assessment"]["confidence"] = 0.80
+        elif primary_issue in ("refund_pending", "insufficient_evidence"):
+            output["assessment"]["confidence"] = 0.85
         elif output["assessment"]["confidence"] > 0.95:
             output["assessment"]["confidence"] = 0.95
 

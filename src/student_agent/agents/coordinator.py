@@ -16,7 +16,6 @@ class CoordinatorHandoff:
     case_id: str
     entity_resolution: dict[str, Any]
     customer_context: dict[str, Any]
-    customer_history_orders: list[dict[str, Any]] = field(default_factory=list)
     claims: list[dict[str, Any]] = field(default_factory=list)
     raw_case: dict[str, Any] = field(default_factory=dict)
 
@@ -51,7 +50,6 @@ class CoordinatorAgent:
             or customer_req.get("customer_unique_id")
         )
         related_order_ids: list[str] = []
-        customer_history_orders: list[dict[str, Any]] = []
 
         direct_order_id = case.get("order_id") or customer_req.get("claimed_order_id")
         candidate_order_ids = list(case.get("candidate_order_ids") or [])
@@ -71,14 +69,7 @@ class CoordinatorAgent:
                 orders = history_data.get("orders") or history_data.get("order_ids") or []
                 if isinstance(orders, list):
                     for ord_item in orders:
-                        if isinstance(ord_item, str):
-                            oid = ord_item
-                            customer_history_orders.append({"order_id": oid})
-                        elif isinstance(ord_item, dict):
-                            oid = ord_item.get("order_id")
-                            customer_history_orders.append(ord_item)
-                        else:
-                            oid = None
+                        oid = ord_item if isinstance(ord_item, str) else ord_item.get("order_id")
                         if oid and oid not in related_order_ids:
                             related_order_ids.append(oid)
 
@@ -170,7 +161,6 @@ class CoordinatorAgent:
             case_id=case_id,
             entity_resolution=entity_resolution,
             customer_context=customer_context,
-            customer_history_orders=customer_history_orders,
             claims=claims,
             raw_case=case,
         )

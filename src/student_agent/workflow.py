@@ -67,7 +67,6 @@ async def solve_case(
         resolved_order_ids,
         case,
         include_product_context=bool(investigation_scope.get("include_product_context")),
-        customer_history_orders=handoff.customer_history_orders,
     )
 
     order_requires_payment = any(

@@ -14,7 +14,7 @@ class ResilientGatewayClient:
         self,
         gateway: EvidenceGateway,
         trace: TraceWriter,
-        max_retries: int = 0,
+        max_retries: int = 2,
         retry_delay_seconds: float = 0.5,
     ) -> None:
         self.gateway = gateway
@@ -42,20 +42,13 @@ class ResilientGatewayClient:
         case_id: str,
         **arguments: Any,
     ) -> dict[str, Any] | None:
-        """Call one MCP tool with per-case deduplication and observable tracing.
-
-        Competition calls are audited even when they fail.  The default therefore
-        deliberately performs one attempt: retrying a deterministic schema/argument
-        error only burns the private call budget.  A caller may still opt into a
-        bounded retry for a deployment where transient failures are expected.
-        """
+        """Call MCP tool with per-case deduplication, bounded retries and tracing."""
         clean_args = {k: str(v) for k, v in arguments.items() if v is not None}
         cache_key = (tool_name, case_id, tuple(sorted(clean_args.items())))
 
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 response = await self.gateway.call(tool_name, case_id=case_id, **clean_args)
@@ -78,12 +71,9 @@ class ResilientGatewayClient:
 
                 self._cache[cache_key] = response
                 return response
-            except Exception as exc:
-                last_error = exc
+            except Exception:
                 if attempt < self.max_retries:
                     await asyncio.sleep(self.retry_delay_seconds * (attempt + 1))
 
-        # Do not emit a plausible-looking but hard-gated submission when required
-        # evidence was never obtained.  The failed run can be retried later; its
-        # unaudited fallback must not leak into outputs.
-        raise RuntimeError(f"MCP tool {tool_name} failed for {case_id}") from last_error
+        # Tool failed after retry budget: do not hallucinate, return None
+        return None

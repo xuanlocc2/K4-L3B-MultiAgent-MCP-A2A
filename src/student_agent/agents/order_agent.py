@@ -31,7 +31,6 @@ class OrderAgent:
         raw_case: dict[str, Any],
         *,
         include_product_context: bool = False,
-        customer_history_orders: list[dict[str, Any]] | None = None,
     ) -> OrderInvestigationResult:
         result = OrderInvestigationResult()
 
@@ -61,25 +60,36 @@ class OrderAgent:
                         }
                     )
 
-            # Reuse the coordinator's customer-history result instead of making
-            # another MCP call.  A terminal status in history wins over a stale
-            # order row and the conflict remains explicit in the output.
-            for h_ord in customer_history_orders or []:
-                if h_ord.get("order_id") != order_id:
-                    continue
-                h_status = str(h_ord.get("order_status") or h_ord.get("status") or "").lower()
-                curr_status = result.order_status.get(order_id, "")
-                if h_status in ("canceled", "unavailable") and curr_status != h_status:
-                    result.data_conflicts.append(
-                        {
-                            "field": "order_status",
-                            "sources": ["mcp_get_order", "mcp_get_customer_history"],
-                            "selected_source": "mcp_get_customer_history",
-                            "resolution_code": "LATEST_EVENT_TIMESTAMP_PRECEDENCE",
-                        }
-                    )
-                    result.order_status[order_id] = h_status
-                break
+            # Check customer history if available for order row discrepancies
+            customer_uid = (
+                raw_case.get("customer_unique_id")
+                or raw_case.get("customer_unique_id_hint")
+                or raw_case.get("customer_request", {}).get("customer_unique_id")
+            )
+            if customer_uid:
+                hist_ev = await self.client.call_tool(
+                    "get_customer_history",
+                    actor=self.actor,
+                    case_id=case_id,
+                    customer_unique_id=customer_uid,
+                )
+                if hist_ev and isinstance(hist_ev.get("data"), dict):
+                    h_orders = hist_ev["data"].get("orders") or []
+                    for h_ord in h_orders:
+                        if isinstance(h_ord, dict) and h_ord.get("order_id") == order_id:
+                            h_status = str(h_ord.get("order_status") or "").lower()
+                            curr_status = result.order_status.get(order_id, "")
+                            if h_status in ("canceled", "unavailable") and curr_status != h_status:
+                                result.data_conflicts.append(
+                                    {
+                                        "field": "order_status",
+                                        "sources": ["mcp_get_order", "mcp_get_customer_history"],
+                                        "selected_source": "mcp_get_customer_history",
+                                        "resolution_code": "LATEST_EVENT_TIMESTAMP_PRECEDENCE",
+                                    }
+                                )
+                                result.order_status[order_id] = h_status
+                                break
 
             # 2. get_order_items (handles list or dict)
             items_ev = await self.client.call_tool(
@@ -109,30 +119,27 @@ class OrderAgent:
                             result.seller_ids.append(str(sid))
 
                         try:
-                            price = float(item.get("price") or item.get("price_brl") or 0.0)
+                            price = float(item.get("price") or 0.0)
                         except (ValueError, TypeError):
                             price = 0.0
                         try:
-                            freight = float(
-                                item.get("freight_value") or item.get("freight_brl") or 0.0
-                            )
+                            freight = float(item.get("freight_value") or 0.0)
                         except (ValueError, TypeError):
                             freight = 0.0
 
                         result.items_total_brl += price
                         result.freight_total_brl += freight
 
-            # Product context is explicitly requested by the case scope.  Pass
-            # both identifiers; EvidenceGateway filters them using the discovered
-            # input schema, avoiding the three failed calls produced by retries.
-            if include_product_context and result.item_ids:
-                await self.client.call_tool(
-                    "get_product_context",
-                    actor=self.actor,
-                    case_id=case_id,
-                    product_id=result.item_ids[-1],
-                    order_id=order_id,
-                )
+            # Product context is explicitly requested by the case scope. Fetch it only
+            # after item IDs are known, and only once per distinct product.
+            if include_product_context:
+                for product_id in list(result.item_ids):
+                    await self.client.call_tool(
+                        "get_product_context",
+                        actor=self.actor,
+                        case_id=case_id,
+                        product_id=product_id,
+                    )
 
             # 3. get_sellers if seller_ids empty
             if not result.seller_ids:

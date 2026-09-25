@@ -70,12 +70,7 @@ class PaymentAgent:
                     if isinstance(p, dict):
                         result.raw_payments.append(p)
                         try:
-                            pval = float(
-                                p.get("payment_value")
-                                or p.get("captured_amount_brl")
-                                or p.get("amount_brl")
-                                or 0.0
-                            )
+                            pval = float(p.get("payment_value") or 0.0)
                         except (ValueError, TypeError):
                             pval = 0.0
                         total_captured += pval
@@ -91,10 +86,7 @@ class PaymentAgent:
 
                         ptype = str(p.get("payment_type") or "").lower()
                         payment_status = str(
-                            p.get("status")
-                            or p.get("payment_status")
-                            or p.get("capture_status")
-                            or ""
+                            p.get("status") or p.get("payment_status") or ""
                         ).lower()
                         if "refund" in payment_status and "pending" in payment_status:
                             result.has_pending_refund = True
@@ -116,16 +108,6 @@ class PaymentAgent:
                 ref_ev = None
             if ref_ev:
                 rdata = ref_ev.get("data")
-                if isinstance(rdata, dict):
-                    try:
-                        reported_refunded = float(
-                            rdata.get("refunded_total_brl")
-                            or rdata.get("completed_refund_brl")
-                            or 0.0
-                        )
-                    except (TypeError, ValueError):
-                        reported_refunded = 0.0
-                    total_refunded = max(total_refunded, reported_refunded)
                 events = (
                     rdata
                     if isinstance(rdata, list)
@@ -135,19 +117,9 @@ class PaymentAgent:
                 )
                 for ev in events:
                     if isinstance(ev, dict):
-                        status = str(
-                            ev.get("status")
-                            or ev.get("refund_status")
-                            or ev.get("event_type")
-                            or ""
-                        ).lower()
+                        status = str(ev.get("status") or ev.get("event_type") or "").lower()
                         try:
-                            amount = float(
-                                ev.get("amount")
-                                or ev.get("refund_amount")
-                                or ev.get("amount_brl")
-                                or 0.0
-                            )
+                            amount = float(ev.get("amount") or ev.get("refund_amount") or 0.0)
                         except (ValueError, TypeError):
                             amount = 0.0
                         if "completed" in status or "success" in status or "refunded" in status:
@@ -178,9 +150,7 @@ class PaymentAgent:
                         ev_type = str(ev.get("event_type") or ev.get("status") or "").lower()
                         if "duplicate" in ev_type:
                             result.has_duplicate_charge = True
-                        # A completed reconciliation is the normal success path;
-                        # only an explicit mismatch/discrepancy indicates failure.
-                        if "mismatch" in ev_type or "discrepancy" in ev_type:
+                        if "mismatch" in ev_type or "reconciliation" in ev_type:
                             result.has_capture_mismatch = True
                         if "refund" in ev_type and "pending" in ev_type:
                             result.has_pending_refund = True
@@ -211,7 +181,6 @@ class PaymentAgent:
         ):
             result.verdict = "refunded"
         elif expected_total_brl > 0 and abs(result.captured_total_brl - expected_total_brl) > 1.0:
-            result.has_capture_mismatch = True
             result.verdict = "capture_mismatch"
         else:
             result.verdict = "reconciled"

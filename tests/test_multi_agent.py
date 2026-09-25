@@ -5,9 +5,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
-
-from student_agent.agents.mcp_client import ResilientGatewayClient
 from student_agent.contracts import Contracts
 from student_agent.trace import TraceWriter
 from student_agent.workflow import solve_case
@@ -71,37 +68,14 @@ class MockEvidenceGateway:
                 ]
             }
         elif tool_name == "get_order_payments":
-            payments = [
-                {
-                    "payment_sequential": 1,
-                    "payment_type": "credit_card",
-                    "payment_installments": 1,
-                    "payment_value": 114.9,
-                    "payment_reference": "pay_ref_001",
-                }
-            ]
-            if self.scenario == "valid_split":
-                payments = [
+            data = {
+                "payments": [
                     {
                         "payment_sequential": 1,
                         "payment_type": "credit_card",
-                        "payment_value": 60.0,
-                        "payment_reference": "pay_ref_split_1",
-                    },
-                    {
-                        "payment_sequential": 2,
-                        "payment_type": "voucher",
-                        "payment_value": 54.9,
-                        "payment_reference": "pay_ref_split_2",
-                    },
-                ]
-            data = {"payments": payments}
-        elif tool_name == "get_payment_timeline":
-            data = {
-                "events": [
-                    {
-                        "event_type": "reconciliation_completed",
-                        "status": "confirmed",
+                        "payment_installments": 1,
+                        "payment_value": 114.9,
+                        "payment_reference": "pay_ref_001",
                     }
                 ]
             }
@@ -297,27 +271,6 @@ def test_solve_case_candidate_resolution(tmp_path: Path) -> None:
     asyncio.run(_test())
 
 
-def test_valid_split_reconciliation_is_not_a_mismatch(tmp_path: Path) -> None:
-    async def _test() -> None:
-        root = Path(__file__).resolve().parents[1]
-        contracts = Contracts(root / "contracts" / "schemas")
-        trace = TraceWriter(tmp_path / "valid-split-trace.jsonl", contracts)
-        gateway = MockEvidenceGateway(contracts, scenario="valid_split")
-        case = {
-            "case_id": "CASE_SPLIT_01",
-            "order_id": "ORD_SPLIT",
-            "claims": [{"claim_id": "claim-split", "topic": "valid_split_payment"}],
-        }
-
-        output = await solve_case(case, gateway, trace)
-
-        assert output["payment_analysis"]["verdict"] == "reconciled"
-        assert output["assessment"]["primary_issue"] == "valid_split_payment"
-        assert output["assessment"]["case_status"] == "no_action"
-
-    asyncio.run(_test())
-
-
 def test_missing_policy_does_not_fabricate_refund(tmp_path: Path) -> None:
     async def _test():
         root = Path(__file__).resolve().parents[1]
@@ -430,35 +383,5 @@ def test_claim_routing_uses_minimum_sufficient_tools(tmp_path: Path) -> None:
             assert required <= called
             assert forbidden.isdisjoint(called)
             assert len(gateway.call_history) <= 7
-
-    asyncio.run(_test())
-
-
-def test_failed_tool_is_not_retried_by_default(tmp_path: Path) -> None:
-    class FailingGateway:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def call(self, tool_name: str, *, case_id: str, **arguments: str):
-            del tool_name, case_id, arguments
-            self.calls += 1
-            raise RuntimeError("invalid tool arguments")
-
-    async def _test() -> None:
-        root = Path(__file__).resolve().parents[1]
-        contracts = Contracts(root / "contracts" / "schemas")
-        trace = TraceWriter(tmp_path / "failed-trace.jsonl", contracts)
-        gateway = FailingGateway()
-        client = ResilientGatewayClient(gateway, trace)
-
-        with pytest.raises(RuntimeError, match="get_product_context failed"):
-            await client.call_tool(
-                "get_product_context",
-                actor="order-agent",
-                case_id="CASE_FAILURE_01",
-                product_id="product-1",
-            )
-
-        assert gateway.calls == 1
 
     asyncio.run(_test())

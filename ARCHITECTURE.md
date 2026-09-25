@@ -121,7 +121,7 @@ flowchart TD
 
 | Loại sự cố | Ngân sách Retry | Chiến lược Fallback | Trace Event / Decision Code |
 | --- | ---: | --- | --- |
-| **MCP Timeout / Network Error** | 0 lần tự động | Dừng run để không tạo submission thiếu evidence và không đốt thêm audited-call budget | Raise lỗi có tên tool/case; chạy lại bằng session mới khi gateway ổn định |
+| **MCP Timeout / Network Error** | 2 lần (Exponential backoff 0.5s, 1.0s) | Đánh dấu verdict tương ứng là `"insufficient_evidence"`, không sinh dữ liệu giả | Silent retry nội bộ; fallback ghi nhận vào verdict |
 | **Entity Not Found / Ambiguous** | 1 lần probe | Đặt trạng thái `not_found` hoặc `ambiguous`, đề xuất hành động yêu cầu bổ sung thông tin từ khách | `policy_decided` với mã `INSUFFICIENT_EVIDENCE` |
 | **Data Conflict** | 0 lần | Tự động áp dụng quyền ưu tiên của nguồn chính thức (Authoritative Precedence) | Ghi nhận vào `data_conflicts` |
 | **Invalid Specialist Result** | 0 lần | Thu hồi về trạng thái an toàn bảo thủ (`needs_investigation`), refund = 0 | `verification_completed` với cờ hiệu bảo toàn |
@@ -129,7 +129,6 @@ flowchart TD
 ### 5.2 Chiến lược tối ưu chi phí gọi MCP (Query Budget & Cache Strategy)
 - **In-Memory Per-Case Cache**: Toàn bộ lượt gọi tool được lưu bộ nhớ đệm theo bộ ba `(tool_name, case_id, sorted_args)`. Nếu một tool đã được gọi với cùng tham số trong cùng case, kết quả được trả về ngay lập tức từ cache, không phát sinh call tới gateway.
 - **Minimum Sufficient Evidence**: Order context được lấy trước; claim topic và trạng thái order quyết định có chạy Payment/Refund hoặc Shipment hay không. Product context chỉ được lấy khi scope yêu cầu. Không gọi quét rộng hay gọi timeline “just in case”.
-- **Schema-aware Arguments**: Tool discovery lưu tập tham số được MCP công bố. Với `get_product_context`, agent cung cấp cả candidate `product_id`/`order_id`, gateway chỉ gửi tham số hợp lệ, tránh retry do sai schema.
 
 ---
 

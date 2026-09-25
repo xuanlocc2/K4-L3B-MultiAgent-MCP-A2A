@@ -76,65 +76,53 @@ class PolicyAgent:
             else (order_res.seller_ids[0] if order_res.seller_ids else None)
         )
 
-        # Build conclusions only from authoritative specialist results.  The
-        # customer's topic routes the investigation, but is never proof by itself.
-        observed_issues: list[str] = []
-
-        def observe(issue: str, condition: bool) -> None:
-            if condition and issue not in observed_issues:
-                observed_issues.append(issue)
-
-        paid = (payment_res.captured_total_brl or 0.0) > 0.0
-        observe("canceled_order_paid", is_canceled and paid)
-        observe("unavailable_order_paid", is_unavailable and paid)
-        observe("refund_failed", payment_res.verdict == "refund_failed")
-        observe("refund_pending", payment_res.verdict == "refund_pending")
-        observe("duplicate_charge", payment_res.verdict == "duplicate_capture")
-        observe("payment_mismatch", payment_res.verdict == "capture_mismatch")
-        observe("late_delivery_seller", shipment_res.verdict == "seller_delay")
-        observe("late_delivery_logistics", shipment_res.verdict == "logistics_delay")
-        observe(
-            "valid_split_payment",
-            "valid_split_payment" in claim_topics
-            and payment_res.verdict == "reconciled"
-            and len(payment_res.raw_payments) > 1,
-        )
-
-        resolution_status = handoff.entity_resolution["status"]
-        if resolution_status in {"not_found", "ambiguous"}:
+        if handoff.entity_resolution["status"] == "not_found":
             primary_issue = "insufficient_evidence"
+        elif is_canceled:
+            primary_issue = "canceled_order_paid"
+        elif is_unavailable:
+            primary_issue = "unavailable_order_paid"
+        elif "refund_failed" in claim_topics or payment_res.has_failed_refund:
+            primary_issue = "refund_failed"
+        elif "refund_pending" in claim_topics or payment_res.has_pending_refund:
+            primary_issue = "refund_pending"
+        elif "payment_mismatch" in claim_topics or payment_res.has_capture_mismatch:
+            primary_issue = "payment_mismatch"
+        elif "duplicate_charge" in claim_topics or payment_res.has_duplicate_charge:
+            primary_issue = "duplicate_charge"
+        elif shipment_res.confirmed_delay_actor == "logistics_provider" or (
+            "late_delivery_logistics" in claim_topics and shipment_res.verdict == "logistics_delay"
+        ):
+            primary_issue = "late_delivery_logistics"
+        elif shipment_res.confirmed_delay_actor == "seller" or (
+            "late_delivery_seller" in claim_topics and shipment_res.verdict == "seller_delay"
+        ):
+            primary_issue = "late_delivery_seller"
+        elif "late_delivery_logistics" in claim_topics:
+            primary_issue = "late_delivery_logistics"
+        elif "late_delivery_seller" in claim_topics:
+            primary_issue = "late_delivery_seller"
+        elif "valid_split_payment" in claim_topics:
+            primary_issue = "valid_split_payment"
+        elif "unsupported_claim" in claim_topics:
+            primary_issue = "unsupported_claim"
+        elif shipment_res.verdict == "seller_delay":
+            primary_issue = "late_delivery_seller"
+        elif shipment_res.verdict == "logistics_delay":
+            primary_issue = "late_delivery_logistics"
         else:
-            # Prefer the investigated claim when the evidence confirms it.  This
-            # preserves the case's business question while retaining other
-            # independently verified findings as secondary issues.
-            supported_claims = [topic for topic in claim_topics if topic in observed_issues]
-            if supported_claims:
-                primary_issue = supported_claims[0]
-            elif observed_issues:
-                primary_issue = observed_issues[0]
-            elif "unsupported_claim" in claim_topics or claim_topics:
-                primary_issue = "unsupported_claim"
-            else:
-                primary_issue = "unsupported_claim"
-
-        secondary_issues = [issue for issue in observed_issues if issue != primary_issue]
+            primary_issue = "unsupported_claim"
 
         # Confidence calibration based on evidence quality and completeness
         has_conflicts = len(order_res.data_conflicts) > 0
-        if resolution_status == "ambiguous":
+        if handoff.entity_resolution["status"] == "ambiguous":
             confidence = 0.50
-        elif resolution_status == "not_found":
-            confidence = 0.25
         elif has_conflicts:
             confidence = 0.80  # Reduced confidence due to evidence conflict
-        elif primary_issue == "insufficient_evidence":
-            confidence = 0.35
-        elif primary_issue == "refund_pending":
-            confidence = 0.90
-        elif primary_issue in claim_topics or primary_issue == "unsupported_claim":
-            confidence = 0.98
+        elif primary_issue in ("refund_pending", "insufficient_evidence"):
+            confidence = 0.85  # Needs further investigation
         else:
-            confidence = 0.90
+            confidence = 0.95  # Clean audited evidence matches claim
 
         # Policy outcomes must come from the audited MCP response. A missing or
         # malformed rule is unresolved; it must never become a fabricated refund.
@@ -172,13 +160,12 @@ class PolicyAgent:
             "unsupported_claim": "TRANSACTION_COMPLETED_PER_TERMS",
             "insufficient_evidence": "INSUFFICIENT_EVIDENCE_FOR_CLAIM",
         }
-        for rank, issue in enumerate([primary_issue, *secondary_issues][:5], 1):
-            ranked_causes.append(
-                {
-                    "cause_code": cause_code_map.get(issue, "INVESTIGATION_CONCLUSION"),
-                    "rank": rank,
-                }
-            )
+        ranked_causes.append(
+            {
+                "cause_code": cause_code_map.get(primary_issue, "INVESTIGATION_CONCLUSION"),
+                "rank": 1,
+            }
+        )
 
         # Set responsible parties with strict cross-field consistency
         if primary_issue == "late_delivery_seller":
@@ -254,11 +241,11 @@ class PolicyAgent:
         }
 
         def evidence_for_claim(topic: str | None) -> list[str]:
-            effective_topic = primary_issue if topic == "requested_full_refund" else topic
             tools = {
                 "get_customer_history",
                 "get_policy",
-                *issue_tools.get(effective_topic or "", ()),
+                *issue_tools.get(primary_issue, ()),
+                *issue_tools.get(topic or "", ()),
             }
             if handoff.raw_case.get("investigation_scope", {}).get("include_product_context"):
                 tools.update({"get_order_items", "get_product_context"})
@@ -268,22 +255,10 @@ class PolicyAgent:
         for claim in handoff.claims:
             claim_id = claim.get("claim_id") or "claim_1"
             topic = claim.get("topic")
-            if topic == "requested_full_refund":
-                refundable = payment_res.refundable_total_brl
-                if (
-                    recommended_refund > 0
-                    and refundable is not None
-                    and abs(recommended_refund - refundable) <= 0.01
-                ):
-                    verdict = "supported"
-                elif recommended_refund > 0:
-                    verdict = "partially_supported"
-                else:
-                    verdict = "unsupported"
-            elif topic in observed_issues or (topic == "unsupported_claim" and not observed_issues):
+            if topic == primary_issue:
                 verdict = "supported"
-            elif resolution_status in {"not_found", "ambiguous"}:
-                verdict = "insufficient_evidence"
+            elif topic == "requested_full_refund" and case_status == "action_required":
+                verdict = "partially_supported"
             else:
                 verdict = "unsupported"
 
