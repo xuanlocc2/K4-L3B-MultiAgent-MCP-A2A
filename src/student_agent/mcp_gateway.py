@@ -16,15 +16,32 @@ class EvidenceGateway:
     def __init__(self, session: ClientSession, contracts: Contracts) -> None:
         self._session = session
         self._contracts = contracts
+        self._tool_input_properties: dict[str, set[str]] = {}
 
     async def list_tools(self) -> list[str]:
         response = await self._session.list_tools()
+        for tool in response.tools:
+            schema = getattr(tool, "inputSchema", None)
+            if schema is None:
+                schema = getattr(tool, "input_schema", None)
+            if isinstance(schema, dict) and isinstance(schema.get("properties"), dict):
+                self._tool_input_properties[tool.name] = set(schema["properties"])
         return sorted(tool.name for tool in response.tools)
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
+        # Some gateway releases expose product context by product_id, while
+        # others expose it by order_id.  Agents can provide both candidates;
+        # discovery lets us submit only parameters accepted by the live tool.
+        accepted = self._tool_input_properties.get(tool_name)
+        if accepted:
+            payload = {
+                "case_id": case_id,
+                **{key: value for key, value in arguments.items() if key in accepted},
+            }
         result = await self._session.call_tool(tool_name, arguments=payload)
-        if result.isError:
+        is_error = getattr(result, "is_error", getattr(result, "isError", False))
+        if is_error:
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )
